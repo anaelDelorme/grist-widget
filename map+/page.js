@@ -17,7 +17,6 @@ let lastRecords = null;
 let writeAccess = true;
 let scanning = null;
 let mode = 'multi';
-let isInitialRender = true;
 
 /* =========================================================
    Map configuration
@@ -63,12 +62,12 @@ function getInfo(rec) {
 }
 
 function showProblem(txt) {
-  document.getElementById('map').innerHTML =
-    `<div class="error">${txt}</div>`;
+  const mapEl = document.getElementById('map');
+  if (mapEl) mapEl.innerHTML = `<div class="error">${txt}</div>`;
 }
 
 /* =========================================================
-   SVG Marker factory (HEX-safe)
+   Marker SVG factory (HEX-safe)
    ========================================================= */
 
 function sanitizeColor(color) {
@@ -79,7 +78,7 @@ function sanitizeColor(color) {
   return '#3388ff';
 }
 
-function darkenColor(hex, amount = 20) {
+function darkenColor(hex, amount = 30) {
   if (!hex.startsWith('#')) return '#333';
   let num = parseInt(hex.slice(1), 16);
   let r = Math.max(0, (num >> 16) - amount);
@@ -90,9 +89,9 @@ function darkenColor(hex, amount = 20) {
 
 function createSvgMarker(color, selected = false) {
   const fill = sanitizeColor(color);
-  const stroke = darkenColor(fill, 30);
-  const size = selected ? 42 : 36; // légèrement plus grand si sélectionné
-  const shadow = selected ? 'filter: drop-shadow(0 4px 8px rgba(0,0,0,0.35));' : '';
+  const stroke = selected ? fill : darkenColor(fill, 30);
+  const size = selected ? 40 : 36; // légèrement plus grand si sélectionné
+  const shadow = selected ? 'filter: drop-shadow(0 4px 8px rgba(0,0,0,.35));' : '';
 
   return L.divIcon({
     className: '',
@@ -133,14 +132,11 @@ function delay(ms) {
 
 async function scan(tableId, records, mappings) {
   if (!writeAccess || !geocoder) return;
-
   for (const record of records) {
-    if (!(Geocode in record) || !record[Geocode]) continue;
-
+    if (!record[Geocode]) continue;
     const address = record[Address];
     if (!address) continue;
-
-    if (record[GeocodedAddress] && record[GeocodedAddress] === address) continue;
+    if (record[GeocodedAddress] === address) continue;
 
     const result = await geocode(address);
     if (!result) continue;
@@ -152,15 +148,13 @@ async function scan(tableId, records, mappings) {
         ...(GeocodedAddress in mappings ? { [mappings[GeocodedAddress]]: address } : {})
       }]
     ]);
-
     await delay(1000);
   }
 }
 
 function scanOnNeed(mappings) {
   if (!scanning && selectedTableId && selectedRecords) {
-    scanning = scan(selectedTableId, selectedRecords, mappings)
-      .finally(() => scanning = null);
+    scanning = scan(selectedTableId, selectedRecords, mappings).finally(() => scanning = null);
   }
 }
 
@@ -173,31 +167,18 @@ let clearMarkers = () => {};
 function updateMap(data) {
   data = data || selectedRecords;
   selectedRecords = data;
-
-  if (!data || !data.length) {
-    showProblem("No data found");
-    return;
-  }
-
-  if (!(Longitude in data[0] && Latitude in data[0])) {
-    showProblem("Missing Latitude / Longitude columns");
-    return;
-  }
+  if (!data || !data.length) { showProblem("No data found"); return; }
+  if (!(Longitude in data[0] && Latitude in data[0])) { showProblem("Missing Latitude/Longitude"); return; }
 
   const tiles = L.tileLayer(mapSource, {
     attribution: DOMPurify.sanitize(mapCopyright, { FORCE_BODY: true })
   });
 
   if (amap) {
-    amap.off();
-    amap.remove();
+    amap.off(); amap.remove();
   }
 
-  const map = L.map('map', {
-    layers: [tiles],
-    wheelPxPerZoomLevel: 90
-  });
-
+  const map = L.map('map', { layers: [tiles], wheelPxPerZoomLevel: 90 });
   map.createPane('selectedMarker').style.zIndex = 620;
   map.createPane('otherMarkers').style.zIndex = 600;
 
@@ -207,7 +188,6 @@ function updateMap(data) {
   for (const rec of data) {
     const { id, name, lng, lat, color } = getInfo(rec);
     if (lng == null || lat == null) continue;
-
     points.push([lat, lng]);
 
     const marker = L.marker([lat, lng], {
@@ -229,16 +209,11 @@ function updateMap(data) {
     popups = {};
   };
 
-  if (points.length && isInitialRender) {
-    map.fitBounds(points, { maxZoom: 15 });
-    isInitialRender = false;
-  }
+  if (points.length) map.fitBounds(points, { maxZoom: 15 });
 
   amap = map;
 
-  if (selectedRowId && popups[selectedRowId]) {
-    popups[selectedRowId].openPopup();
-  }
+  if (selectedRowId && popups[selectedRowId]) popups[selectedRowId].openPopup();
 }
 
 /* =========================================================
@@ -248,18 +223,18 @@ function updateMap(data) {
 function selectMarker(id) {
   if (selectedRowId === id) return;
 
+  // Désélectionner l'ancien marker
   if (selectedRowId && popups[selectedRowId]) {
-    const old = popups[selectedRowId];
     const oldRec = lastRecords?.find(r => r.id === selectedRowId) || lastRecord;
-    old.setIcon(createSvgMarker(parseValue(oldRec?.Color), false));
+    popups[selectedRowId].setIcon(createSvgMarker(parseValue(oldRec?.Color), false));
   }
 
   selectedRowId = id;
 
+  const rec = lastRecords?.find(r => r.id === id) || lastRecord;
   const marker = popups[id];
   if (!marker) return;
 
-  const rec = lastRecords?.find(r => r.id === id) || lastRecord;
   marker.setIcon(createSvgMarker(parseValue(rec?.Color), true));
   marker.openPopup();
 
@@ -270,14 +245,10 @@ function selectMarker(id) {
    Grist bindings
    ========================================================= */
 
-grist.on('message', e => {
-  if (e.tableId) selectedTableId = e.tableId;
-});
+grist.on('message', e => { if (e.tableId) selectedTableId = e.tableId; });
 
 grist.onRecord((record, mappings) => {
   lastRecord = grist.mapColumnNames(record) || record;
-  if (!lastRecords) lastRecords = [lastRecord];
-  updateMap(lastRecords);
   selectMarker(lastRecord.id);
   scanOnNeed(mappings);
 });
