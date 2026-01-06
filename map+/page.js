@@ -79,8 +79,20 @@ function sanitizeColor(color) {
   return '#3388ff';
 }
 
+function darkenColor(hex, amount = 20) {
+  if (!hex.startsWith('#')) return '#333';
+
+  let num = parseInt(hex.slice(1), 16);
+  let r = Math.max(0, (num >> 16) - amount);
+  let g = Math.max(0, ((num >> 8) & 0x00FF) - amount);
+  let b = Math.max(0, (num & 0x0000FF) - amount);
+
+  return `rgb(${r},${g},${b})`;
+}
+
 function createSvgMarker(color, selected = false) {
   const fill = sanitizeColor(color);
+  const stroke = darkenColor(fill, 30);
   const size = 36;
 
   return L.divIcon({
@@ -92,12 +104,14 @@ function createSvgMarker(color, selected = false) {
       <svg xmlns="http://www.w3.org/2000/svg"
            width="${size}" height="${size}"
            viewBox="0 0 24 24"
-           style="${selected ? 'filter: drop-shadow(0 0 6px rgba(0,0,0,.6));' : ''}">
+           style="
+             ${selected ? 'filter: drop-shadow(0 4px 8px rgba(0,0,0,.35));' : ''}
+           ">
         <path
           d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7z"
           fill="${fill}"
-          stroke="${selected ? '#000' : '#333'}"
-          stroke-width="${selected ? 3 : 1.5}"
+          stroke="${stroke}"
+          stroke-width="1.4"
         />
         <circle cx="12" cy="9" r="3" fill="white"/>
       </svg>
@@ -265,6 +279,12 @@ function selectMarker(id) {
 /* =========================================================
    Grist bindings
    ========================================================= */
+let isInitialRender = true;
+
+if (points.length && isInitialRender) {
+  map.fitBounds(points, { maxZoom: 15 });
+  isInitialRender = false;
+}
 
 grist.on('message', e => {
   if (e.tableId) selectedTableId = e.tableId;
@@ -272,8 +292,7 @@ grist.on('message', e => {
 
 grist.onRecord((record, mappings) => {
   lastRecord = grist.mapColumnNames(record) || record;
-  selectedRowId = lastRecord.id;
-  updateMap();
+  selectMarker(lastRecord.id);
   scanOnNeed(mappings);
 });
 
