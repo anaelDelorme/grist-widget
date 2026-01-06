@@ -17,6 +17,7 @@ let lastRecords = null;
 let writeAccess = true;
 let scanning = null;
 let mode = 'multi';
+let isInitialRender = true;
 
 /* =========================================================
    Map configuration
@@ -24,7 +25,6 @@ let mode = 'multi';
 
 let mapSource =
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}';
-
 let mapCopyright =
   'Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ';
 
@@ -81,19 +81,18 @@ function sanitizeColor(color) {
 
 function darkenColor(hex, amount = 20) {
   if (!hex.startsWith('#')) return '#333';
-
   let num = parseInt(hex.slice(1), 16);
   let r = Math.max(0, (num >> 16) - amount);
   let g = Math.max(0, ((num >> 8) & 0x00FF) - amount);
   let b = Math.max(0, (num & 0x0000FF) - amount);
-
   return `rgb(${r},${g},${b})`;
 }
 
 function createSvgMarker(color, selected = false) {
   const fill = sanitizeColor(color);
   const stroke = darkenColor(fill, 30);
-  const size = 36;
+  const size = selected ? 42 : 36; // légèrement plus grand si sélectionné
+  const shadow = selected ? 'filter: drop-shadow(0 4px 8px rgba(0,0,0,0.35));' : '';
 
   return L.divIcon({
     className: '',
@@ -104,9 +103,7 @@ function createSvgMarker(color, selected = false) {
       <svg xmlns="http://www.w3.org/2000/svg"
            width="${size}" height="${size}"
            viewBox="0 0 24 24"
-           style="
-             ${selected ? 'filter: drop-shadow(0 4px 8px rgba(0,0,0,.35));' : ''}
-           ">
+           style="${shadow}">
         <path
           d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7z"
           fill="${fill}"
@@ -143,12 +140,7 @@ async function scan(tableId, records, mappings) {
     const address = record[Address];
     if (!address) continue;
 
-    if (
-      record[GeocodedAddress] &&
-      record[GeocodedAddress] === address
-    ) {
-      continue;
-    }
+    if (record[GeocodedAddress] && record[GeocodedAddress] === address) continue;
 
     const result = await geocode(address);
     if (!result) continue;
@@ -157,9 +149,7 @@ async function scan(tableId, records, mappings) {
       ['UpdateRecord', tableId, record.id, {
         [mappings[Longitude]]: result.lng,
         [mappings[Latitude]]: result.lat,
-        ...(GeocodedAddress in mappings
-          ? { [mappings[GeocodedAddress]]: address }
-          : {})
+        ...(GeocodedAddress in mappings ? { [mappings[GeocodedAddress]]: address } : {})
       }]
     ]);
 
@@ -216,7 +206,6 @@ function updateMap(data) {
 
   for (const rec of data) {
     const { id, name, lng, lat, color } = getInfo(rec);
-
     if (lng == null || lat == null) continue;
 
     points.push([lat, lng]);
@@ -240,8 +229,9 @@ function updateMap(data) {
     popups = {};
   };
 
-  if (points.length) {
+  if (points.length && isInitialRender) {
     map.fitBounds(points, { maxZoom: 15 });
+    isInitialRender = false;
   }
 
   amap = map;
@@ -260,7 +250,7 @@ function selectMarker(id) {
 
   if (selectedRowId && popups[selectedRowId]) {
     const old = popups[selectedRowId];
-    const oldRec = lastRecords?.find(r => r.id === selectedRowId);
+    const oldRec = lastRecords?.find(r => r.id === selectedRowId) || lastRecord;
     old.setIcon(createSvgMarker(parseValue(oldRec?.Color), false));
   }
 
@@ -269,7 +259,7 @@ function selectMarker(id) {
   const marker = popups[id];
   if (!marker) return;
 
-  const rec = lastRecords?.find(r => r.id === id);
+  const rec = lastRecords?.find(r => r.id === id) || lastRecord;
   marker.setIcon(createSvgMarker(parseValue(rec?.Color), true));
   marker.openPopup();
 
@@ -279,12 +269,6 @@ function selectMarker(id) {
 /* =========================================================
    Grist bindings
    ========================================================= */
-let isInitialRender = true;
-
-if (points.length && isInitialRender) {
-  map.fitBounds(points, { maxZoom: 15 });
-  isInitialRender = false;
-}
 
 grist.on('message', e => {
   if (e.tableId) selectedTableId = e.tableId;
@@ -292,6 +276,8 @@ grist.on('message', e => {
 
 grist.onRecord((record, mappings) => {
   lastRecord = grist.mapColumnNames(record) || record;
+  if (!lastRecords) lastRecords = [lastRecord];
+  updateMap(lastRecords);
   selectMarker(lastRecord.id);
   scanOnNeed(mappings);
 });
