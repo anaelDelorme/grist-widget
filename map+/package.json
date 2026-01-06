@@ -1,0 +1,24 @@
+{
+  "name": "@anaeldelorme/widget-map",
+  "description": "Map widget with colored markers and custom basemaps",
+  "homePage": "https://github.com/anaelDelorme/grist-widget",
+  "version": "0.0.1",
+  "grist": [
+    {
+      "name": "Map+",
+      "url": "https://anaelDelorme.github.io/grist-widget/map/index.html",
+      "widgetId": "@anaelDelorme/widget-map#map",
+      "published": true,
+      "accessLevel": "read table",
+      "renderAfterReady": true,
+      "description": "Display locations with colored markers and selectable basemaps.",
+      "authors": [
+        {
+          "name": "Anaël Delorme",
+          "url": "https://github.com/anaelDelorme"
+        }
+      ],
+      "isGristLabsMaintained": false
+    }
+  ]
+}
