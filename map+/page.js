@@ -17,6 +17,7 @@ let lastRecords = null;
 let writeAccess = true;
 let scanning = null;
 let mode = 'multi';
+let isInitialRender = true;
 
 /* =========================================================
    Map configuration
@@ -242,6 +243,7 @@ function updateMap(data) {
 
   if (points.length) {
     map.fitBounds(points, { maxZoom: 15 });
+    isInitialRender = false;
   }
 
   amap = map;
@@ -258,9 +260,11 @@ function updateMap(data) {
 function selectMarker(id) {
   if (selectedRowId === id) return;
 
+  // désélection
   if (selectedRowId && popups[selectedRowId]) {
     const old = popups[selectedRowId];
-    const oldRec = lastRecords?.find(r => r.id === selectedRowId);
+    const oldRec =
+      lastRecords?.find(r => r.id === selectedRowId) || lastRecord;
     old.setIcon(createSvgMarker(parseValue(oldRec?.Color), false));
   }
 
@@ -269,7 +273,9 @@ function selectMarker(id) {
   const marker = popups[id];
   if (!marker) return;
 
-  const rec = lastRecords?.find(r => r.id === id);
+  const rec =
+    lastRecords?.find(r => r.id === id) || lastRecord;
+
   marker.setIcon(createSvgMarker(parseValue(rec?.Color), true));
   marker.openPopup();
 
@@ -279,7 +285,6 @@ function selectMarker(id) {
 /* =========================================================
    Grist bindings
    ========================================================= */
-let isInitialRender = true;
 
 if (points.length && isInitialRender) {
   map.fitBounds(points, { maxZoom: 15 });
