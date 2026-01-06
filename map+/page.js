@@ -2,45 +2,50 @@
 
 /* global grist, L, DOMPurify */
 
+/* =========================================================
+   State
+   ========================================================= */
+
 let amap;
 let popups = {};
 let selectedTableId = null;
 let selectedRowId = null;
 let selectedRecords = null;
+let lastRecord = null;
+let lastRecords = null;
+
+let writeAccess = true;
+let scanning = null;
 let mode = 'multi';
+
+/* =========================================================
+   Map configuration
+   ========================================================= */
 
 let mapSource =
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}';
+
 let mapCopyright =
   'Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ';
+
+/* =========================================================
+   Column names
+   ========================================================= */
 
 const Name = "Name";
 const Longitude = "Longitude";
 const Latitude = "Latitude";
+const Address = "Address";
+const Geocode = "Geocode";
+const GeocodedAddress = "GeocodedAddress";
 const Color = "Color";
-
-let lastRecord;
-let lastRecords;
-
-/* =========================================================
-   ExtraMarkers – fabrique d’icônes
-   ========================================================= */
-
-function createMarkerIcon(color, selected) {
-  return L.ExtraMarkers.icon({
-    markerColor: color || 'blue',     // accepte 'red' ou '#ff5733'
-    shape: selected ? 'star' : 'circle',
-    icon: selected ? 'fa-check' : 'fa-circle',
-    prefix: 'fa'
-  });
-}
 
 /* =========================================================
    Utils
    ========================================================= */
 
 function parseValue(v) {
-  if (typeof v === 'object' && v !== null && v.value && v.value.startsWith('V(')) {
+  if (typeof v === 'object' && v !== null && v.value?.startsWith('V(')) {
     const payload = JSON.parse(v.value.slice(2, -1));
     return payload.remote || payload.local || payload.parent || payload;
   }
@@ -63,7 +68,100 @@ function showProblem(txt) {
 }
 
 /* =========================================================
-   Carte
+   SVG Marker factory (HEX-safe)
+   ========================================================= */
+
+function sanitizeColor(color) {
+  if (!color) return '#3388ff';
+  if (/^#[0-9a-fA-F]{6}$/.test(color)) return color;
+  if (/^#[0-9a-fA-F]{3}$/.test(color)) return color;
+  if (/^[a-zA-Z]+$/.test(color)) return color;
+  return '#3388ff';
+}
+
+function createSvgMarker(color, selected = false) {
+  const fill = sanitizeColor(color);
+  const size = 36;
+
+  return L.divIcon({
+    className: '',
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size],
+    popupAnchor: [0, -size + 6],
+    html: `
+      <svg xmlns="http://www.w3.org/2000/svg"
+           width="${size}" height="${size}"
+           viewBox="0 0 24 24"
+           style="${selected ? 'filter: drop-shadow(0 0 6px rgba(0,0,0,.6));' : ''}">
+        <path
+          d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7z"
+          fill="${fill}"
+          stroke="${selected ? '#000' : '#333'}"
+          stroke-width="${selected ? 3 : 1.5}"
+        />
+        <circle cx="12" cy="9" r="3" fill="white"/>
+      </svg>
+    `
+  });
+}
+
+/* =========================================================
+   Geocoding
+   ========================================================= */
+
+let geocoder = L.Control.Geocoder && L.Control.Geocoder.nominatim();
+
+async function geocode(address) {
+  const results = await geocoder.geocode(address);
+  return results[0]?.center || null;
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function scan(tableId, records, mappings) {
+  if (!writeAccess || !geocoder) return;
+
+  for (const record of records) {
+    if (!(Geocode in record) || !record[Geocode]) continue;
+
+    const address = record[Address];
+    if (!address) continue;
+
+    if (
+      record[GeocodedAddress] &&
+      record[GeocodedAddress] === address
+    ) {
+      continue;
+    }
+
+    const result = await geocode(address);
+    if (!result) continue;
+
+    await grist.docApi.applyUserActions([
+      ['UpdateRecord', tableId, record.id, {
+        [mappings[Longitude]]: result.lng,
+        [mappings[Latitude]]: result.lat,
+        ...(GeocodedAddress in mappings
+          ? { [mappings[GeocodedAddress]]: address }
+          : {})
+      }]
+    ]);
+
+    await delay(1000);
+  }
+}
+
+function scanOnNeed(mappings) {
+  if (!scanning && selectedTableId && selectedRecords) {
+    scanning = scan(selectedTableId, selectedRecords, mappings)
+      .finally(() => scanning = null);
+  }
+}
+
+/* =========================================================
+   Map rendering
    ========================================================= */
 
 let clearMarkers = () => {};
@@ -72,15 +170,13 @@ function updateMap(data) {
   data = data || selectedRecords;
   selectedRecords = data;
 
-  if (!data || data.length === 0) {
+  if (!data || !data.length) {
     showProblem("No data found");
     return;
   }
 
-  if (!(Longitude in data[0] && Latitude in data[0] && Name in data[0])) {
-    showProblem(
-      "Table must contain Name, Latitude and Longitude columns."
-    );
+  if (!(Longitude in data[0] && Latitude in data[0])) {
+    showProblem("Missing Latitude / Longitude columns");
     return;
   }
 
@@ -107,28 +203,21 @@ function updateMap(data) {
   for (const rec of data) {
     const { id, name, lng, lat, color } = getInfo(rec);
 
-    if (!lat || !lng || Math.abs(lat) < 0.01 && Math.abs(lng) < 0.01) {
-      continue;
-    }
+    if (lng == null || lat == null) continue;
 
-    const isSelected = id === selectedRowId;
-    const pt = [lat, lng];
-    points.push(pt);
+    points.push([lat, lng]);
 
-    const marker = L.marker(pt, {
-      id,
+    const marker = L.marker([lat, lng], {
+      icon: createSvgMarker(color, id === selectedRowId),
       title: name,
-      pane: isSelected ? 'selectedMarker' : 'otherMarkers',
-      icon: createMarkerIcon(color, isSelected)
+      id,
+      pane: id === selectedRowId ? 'selectedMarker' : 'otherMarkers'
     });
-
-    // stocker la couleur pour les mises à jour
-    marker.options.color = color;
 
     marker.bindPopup(name);
     marker.on('click', () => selectMarker(id));
 
-    marker.addTo(map);
+    map.addLayer(marker);
     popups[id] = marker;
   }
 
@@ -149,17 +238,16 @@ function updateMap(data) {
 }
 
 /* =========================================================
-   Sélection
+   Selection
    ========================================================= */
 
 function selectMarker(id) {
   if (selectedRowId === id) return;
 
-  // ancien marker
   if (selectedRowId && popups[selectedRowId]) {
     const old = popups[selectedRowId];
-    old.setIcon(createMarkerIcon(old.options.color, false));
-    old.options.pane = 'otherMarkers';
+    const oldRec = lastRecords?.find(r => r.id === selectedRowId);
+    old.setIcon(createSvgMarker(parseValue(oldRec?.Color), false));
   }
 
   selectedRowId = id;
@@ -167,8 +255,8 @@ function selectMarker(id) {
   const marker = popups[id];
   if (!marker) return;
 
-  marker.setIcon(createMarkerIcon(marker.options.color, true));
-  marker.options.pane = 'selectedMarker';
+  const rec = lastRecords?.find(r => r.id === id);
+  marker.setIcon(createSvgMarker(parseValue(rec?.Color), true));
   marker.openPopup();
 
   grist.setCursorPos?.({ rowId: id }).catch(() => {});
@@ -178,20 +266,21 @@ function selectMarker(id) {
    Grist bindings
    ========================================================= */
 
-function selectOnMap(rec) {
-  if (selectedRowId === rec.id) return;
-  selectedRowId = rec.id;
-  updateMap();
-}
-
-grist.onRecord((record) => {
-  lastRecord = grist.mapColumnNames(record) || record;
-  selectOnMap(lastRecord);
+grist.on('message', e => {
+  if (e.tableId) selectedTableId = e.tableId;
 });
 
-grist.onRecords((data) => {
+grist.onRecord((record, mappings) => {
+  lastRecord = grist.mapColumnNames(record) || record;
+  selectedRowId = lastRecord.id;
+  updateMap();
+  scanOnNeed(mappings);
+});
+
+grist.onRecords((data, mappings) => {
   lastRecords = grist.mapColumnNames(data) || data;
   updateMap(lastRecords);
+  scanOnNeed(mappings);
 });
 
 grist.onNewRecord(() => {
@@ -208,12 +297,16 @@ grist.ready({
     "Name",
     { name: "Longitude", type: "Numeric" },
     { name: "Latitude", type: "Numeric" },
+    { name: "Address", type: "Text", optional: true },
+    { name: "Geocode", type: "Bool", optional: true },
+    { name: "GeocodedAddress", type: "Text", optional: true },
     { name: "Color", type: "Text", optional: true }
   ],
   allowSelectBy: true
 });
 
-grist.onOptions((options) => {
+grist.onOptions((options, interaction) => {
+  writeAccess = interaction.accessLevel === 'full';
   mapSource = options?.mapSource ?? mapSource;
   mapCopyright = options?.mapCopyright ?? mapCopyright;
 });
