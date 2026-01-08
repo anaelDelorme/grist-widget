@@ -117,13 +117,21 @@ function createSvgMarker(color, selected = false) {
    Offset circulaire pour points superposés
    ========================================================= */
 
-function offsetLatLng(lat, lng, index, total) {
-  const radius = 0.00005; // ~5 mètres
+function offsetLatLngDynamic(lat, lng, index, total, map) {
+  if (!map) return [lat, lng];
+  
+  const radiusPx = 20; // rayon en pixels
   const angle = (index / total) * Math.PI * 2;
-  return [
-    lat + Math.sin(angle) * radius,
-    lng + Math.cos(angle) * radius
-  ];
+  
+  // centre du point
+  const point = map.latLngToContainerPoint([lat, lng]);
+  const offsetPoint = L.point(
+    point.x + Math.cos(angle) * radiusPx,
+    point.y + Math.sin(angle) * radiusPx
+  );
+
+  const newLatLng = map.containerPointToLatLng(offsetPoint);
+  return [newLatLng.lat, newLatLng.lng];
 }
 
 /* =========================================================
@@ -181,8 +189,8 @@ function updateMap(data) {
     group.forEach((info, index) => {
       const [lat, lng] =
         group.length > 1
-          ? offsetLatLng(info.lat, info.lng, index, group.length)
-          : [info.lat, info.lng];
+          ? offsetLatLngDynamic(info.lat, info.lng, index, group.length, map)
+              : [info.lat, info.lng];
 
       points.push([lat, lng]);
 
