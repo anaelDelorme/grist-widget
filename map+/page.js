@@ -114,28 +114,50 @@ function createSvgMarker(color, selected = false) {
 }
 
 /* =========================================================
-   Offset circulaire pour points superposés
+   Geocoding
    ========================================================= */
 
-function offsetLatLngDynamic(lat, lng, index, total, map) {
-  if (!map) return [lat, lng];
-  
-  const radiusPx = 20; // rayon en pixels
-  const angle = (index / total) * Math.PI * 2;
-  
-  // centre du point
-  const point = map.latLngToContainerPoint([lat, lng]);
-  const offsetPoint = L.point(
-    point.x + Math.cos(angle) * radiusPx,
-    point.y + Math.sin(angle) * radiusPx
-  );
+let geocoder = L.Control.Geocoder && L.Control.Geocoder.nominatim();
 
-  const newLatLng = map.containerPointToLatLng(offsetPoint);
-  return [newLatLng.lat, newLatLng.lng];
+async function geocode(address) {
+  const results = await geocoder.geocode(address);
+  return results[0]?.center || null;
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function scan(tableId, records, mappings) {
+  if (!writeAccess || !geocoder) return;
+  for (const record of records) {
+    if (!record[Geocode]) continue;
+    const address = record[Address];
+    if (!address) continue;
+    if (record[GeocodedAddress] === address) continue;
+
+    const result = await geocode(address);
+    if (!result) continue;
+
+    await grist.docApi.applyUserActions([
+      ['UpdateRecord', tableId, record.id, {
+        [mappings[Longitude]]: result.lng,
+        [mappings[Latitude]]: result.lat,
+        ...(GeocodedAddress in mappings ? { [mappings[GeocodedAddress]]: address } : {})
+      }]
+    ]);
+    await delay(1000);
+  }
+}
+
+function scanOnNeed(mappings) {
+  if (!scanning && selectedTableId && selectedRecords) {
+    scanning = scan(selectedTableId, selectedRecords, mappings).finally(() => scanning = null);
+  }
 }
 
 /* =========================================================
-   Map rendering
+   Map rendering with MarkerCluster + Spiderfy
    ========================================================= */
 
 let clearMarkers = () => {};
@@ -172,45 +194,39 @@ function updateMap(data) {
 
   popups = {};
   const points = [];
-  const groups = {};
 
-  /* --- Regroupement par coordonnées exactes --- */
-  for (const rec of data) {
-    const info = getInfo(rec);
-    if (info.lat == null || info.lng == null) continue;
-
-    const key = `${info.lat},${info.lng}`;
-    groups[key] ??= [];
-    groups[key].push(info);
-  }
-
-  /* --- Création des markers avec offset si nécessaire --- */
-  Object.values(groups).forEach(group => {
-    group.forEach((info, index) => {
-      const [lat, lng] =
-        group.length > 1
-          ? offsetLatLngDynamic(info.lat, info.lng, index, group.length, map)
-              : [info.lat, info.lng];
-
-      points.push([lat, lng]);
-
-      const marker = L.marker([lat, lng], {
-        icon: createSvgMarker(info.color, info.id === selectedRowId),
-        title: info.name,
-        id: info.id,
-        pane: info.id === selectedRowId ? 'selectedMarker' : 'otherMarkers'
-      });
-
-      marker.bindPopup(info.name);
-      marker.on('click', () => selectMarker(info.id));
-
-      map.addLayer(marker);
-      popups[info.id] = marker;
-    });
+  // --- MarkerCluster Group ---
+  const clusterGroup = L.markerClusterGroup({
+    spiderfyOnMaxZoom: true,
+    showCoverageOnHover: false,
+    zoomToBoundsOnClick: true,
+    maxClusterRadius: 1 // permet de spiderfy même pour points identiques
   });
 
+  // --- Création des markers ---
+  for (const rec of data) {
+    const { id, name, lng, lat, color } = getInfo(rec);
+    if (lat == null || lng == null) continue;
+
+    points.push([lat, lng]);
+
+    const marker = L.marker([lat, lng], {
+      icon: createSvgMarker(color, id === selectedRowId),
+      title: name,
+      id
+    });
+
+    marker.bindPopup(name);
+    marker.on('click', () => selectMarker(id));
+
+    clusterGroup.addLayer(marker);
+    popups[id] = marker;
+  }
+
+  map.addLayer(clusterGroup);
+
   clearMarkers = () => {
-    Object.values(popups).forEach(m => map.removeLayer(m));
+    clusterGroup.clearLayers();
     popups = {};
   };
 
@@ -260,11 +276,13 @@ grist.on('message', e => {
 grist.onRecord((record, mappings) => {
   lastRecord = grist.mapColumnNames(record) || record;
   selectMarker(lastRecord.id);
+  scanOnNeed(mappings);
 });
 
 grist.onRecords((data, mappings) => {
   lastRecords = grist.mapColumnNames(data) || data;
   updateMap(lastRecords);
+  scanOnNeed(mappings);
 });
 
 grist.onNewRecord(() => {
