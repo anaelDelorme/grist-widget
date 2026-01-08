@@ -67,7 +67,7 @@ function showProblem(txt) {
 }
 
 /* =========================================================
-   Marker SVG factory (HEX-safe)
+   Marker SVG factory
    ========================================================= */
 
 function sanitizeColor(color) {
@@ -90,8 +90,7 @@ function darkenColor(hex, amount = 30) {
 function createSvgMarker(color, selected = false) {
   const fill = sanitizeColor(color);
   const stroke = selected ? fill : darkenColor(fill, 30);
-  const size = selected ? 40 : 36; // légèrement plus grand si sélectionné
-  const shadow = selected ? 'filter: drop-shadow(0 4px 8px rgba(0,0,0,.35));' : '';
+  const size = selected ? 40 : 36;
 
   return L.divIcon({
     className: '',
@@ -101,8 +100,7 @@ function createSvgMarker(color, selected = false) {
     html: `
       <svg xmlns="http://www.w3.org/2000/svg"
            width="${size}" height="${size}"
-           viewBox="0 0 24 24"
-           style="${shadow}">
+           viewBox="0 0 24 24">
         <path
           d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7z"
           fill="${fill}"
@@ -116,46 +114,16 @@ function createSvgMarker(color, selected = false) {
 }
 
 /* =========================================================
-   Geocoding
+   Offset circulaire pour points superposés
    ========================================================= */
 
-let geocoder = L.Control.Geocoder && L.Control.Geocoder.nominatim();
-
-async function geocode(address) {
-  const results = await geocoder.geocode(address);
-  return results[0]?.center || null;
-}
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function scan(tableId, records, mappings) {
-  if (!writeAccess || !geocoder) return;
-  for (const record of records) {
-    if (!record[Geocode]) continue;
-    const address = record[Address];
-    if (!address) continue;
-    if (record[GeocodedAddress] === address) continue;
-
-    const result = await geocode(address);
-    if (!result) continue;
-
-    await grist.docApi.applyUserActions([
-      ['UpdateRecord', tableId, record.id, {
-        [mappings[Longitude]]: result.lng,
-        [mappings[Latitude]]: result.lat,
-        ...(GeocodedAddress in mappings ? { [mappings[GeocodedAddress]]: address } : {})
-      }]
-    ]);
-    await delay(1000);
-  }
-}
-
-function scanOnNeed(mappings) {
-  if (!scanning && selectedTableId && selectedRecords) {
-    scanning = scan(selectedTableId, selectedRecords, mappings).finally(() => scanning = null);
-  }
+function offsetLatLng(lat, lng, index, total) {
+  const radius = 0.00005; // ~5 mètres
+  const angle = (index / total) * Math.PI * 2;
+  return [
+    lat + Math.sin(angle) * radius,
+    lng + Math.cos(angle) * radius
+  ];
 }
 
 /* =========================================================
@@ -167,42 +135,71 @@ let clearMarkers = () => {};
 function updateMap(data) {
   data = data || selectedRecords;
   selectedRecords = data;
-  if (!data || !data.length) { showProblem("No data found"); return; }
-  if (!(Longitude in data[0] && Latitude in data[0])) { showProblem("Missing Latitude/Longitude"); return; }
+
+  if (!data || !data.length) {
+    showProblem("No data found");
+    return;
+  }
+  if (!(Longitude in data[0] && Latitude in data[0])) {
+    showProblem("Missing Latitude/Longitude");
+    return;
+  }
 
   const tiles = L.tileLayer(mapSource, {
     attribution: DOMPurify.sanitize(mapCopyright, { FORCE_BODY: true })
   });
 
   if (amap) {
-    amap.off(); amap.remove();
+    amap.off();
+    amap.remove();
   }
 
-  const map = L.map('map', { layers: [tiles], wheelPxPerZoomLevel: 90 });
+  const map = L.map('map', {
+    layers: [tiles],
+    wheelPxPerZoomLevel: 90
+  });
+
   map.createPane('selectedMarker').style.zIndex = 620;
   map.createPane('otherMarkers').style.zIndex = 600;
 
   popups = {};
   const points = [];
+  const groups = {};
 
+  /* --- Regroupement par coordonnées exactes --- */
   for (const rec of data) {
-    const { id, name, lng, lat, color } = getInfo(rec);
-    if (lng == null || lat == null) continue;
-    points.push([lat, lng]);
+    const info = getInfo(rec);
+    if (info.lat == null || info.lng == null) continue;
 
-    const marker = L.marker([lat, lng], {
-      icon: createSvgMarker(color, id === selectedRowId),
-      title: name,
-      id,
-      pane: id === selectedRowId ? 'selectedMarker' : 'otherMarkers'
-    });
-
-    marker.bindPopup(name);
-    marker.on('click', () => selectMarker(id));
-
-    map.addLayer(marker);
-    popups[id] = marker;
+    const key = `${info.lat},${info.lng}`;
+    groups[key] ??= [];
+    groups[key].push(info);
   }
+
+  /* --- Création des markers avec offset si nécessaire --- */
+  Object.values(groups).forEach(group => {
+    group.forEach((info, index) => {
+      const [lat, lng] =
+        group.length > 1
+          ? offsetLatLng(info.lat, info.lng, index, group.length)
+          : [info.lat, info.lng];
+
+      points.push([lat, lng]);
+
+      const marker = L.marker([lat, lng], {
+        icon: createSvgMarker(info.color, info.id === selectedRowId),
+        title: info.name,
+        id: info.id,
+        pane: info.id === selectedRowId ? 'selectedMarker' : 'otherMarkers'
+      });
+
+      marker.bindPopup(info.name);
+      marker.on('click', () => selectMarker(info.id));
+
+      map.addLayer(marker);
+      popups[info.id] = marker;
+    });
+  });
 
   clearMarkers = () => {
     Object.values(popups).forEach(m => map.removeLayer(m));
@@ -213,7 +210,9 @@ function updateMap(data) {
 
   amap = map;
 
-  if (selectedRowId && popups[selectedRowId]) popups[selectedRowId].openPopup();
+  if (selectedRowId && popups[selectedRowId]) {
+    popups[selectedRowId].openPopup();
+  }
 }
 
 /* =========================================================
@@ -223,10 +222,11 @@ function updateMap(data) {
 function selectMarker(id) {
   if (selectedRowId === id) return;
 
-  // Désélectionner l'ancien marker
   if (selectedRowId && popups[selectedRowId]) {
     const oldRec = lastRecords?.find(r => r.id === selectedRowId) || lastRecord;
-    popups[selectedRowId].setIcon(createSvgMarker(parseValue(oldRec?.Color), false));
+    popups[selectedRowId].setIcon(
+      createSvgMarker(parseValue(oldRec?.Color), false)
+    );
   }
 
   selectedRowId = id;
@@ -245,18 +245,18 @@ function selectMarker(id) {
    Grist bindings
    ========================================================= */
 
-grist.on('message', e => { if (e.tableId) selectedTableId = e.tableId; });
+grist.on('message', e => {
+  if (e.tableId) selectedTableId = e.tableId;
+});
 
 grist.onRecord((record, mappings) => {
   lastRecord = grist.mapColumnNames(record) || record;
   selectMarker(lastRecord.id);
-  scanOnNeed(mappings);
 });
 
 grist.onRecords((data, mappings) => {
   lastRecords = grist.mapColumnNames(data) || data;
   updateMap(lastRecords);
-  scanOnNeed(mappings);
 });
 
 grist.onNewRecord(() => {
@@ -279,10 +279,4 @@ grist.ready({
     { name: "Color", type: "Text", optional: true }
   ],
   allowSelectBy: true
-});
-
-grist.onOptions((options, interaction) => {
-  writeAccess = interaction.accessLevel === 'full';
-  mapSource = options?.mapSource ?? mapSource;
-  mapCopyright = options?.mapCopyright ?? mapCopyright;
 });
